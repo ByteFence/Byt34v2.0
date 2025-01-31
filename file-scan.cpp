@@ -80,5 +80,10 @@ int main() {
         t.join();
     }
     std::cout<<ct;
+    std::cout << "Press 'Q' to exit..." << std::endl;
+    char exitKey;
+    do {
+        std::cin >> exitKey;
+    } while (exitKey != 'q');
     return 0;
 }

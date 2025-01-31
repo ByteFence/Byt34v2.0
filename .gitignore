@@ -20,5 +20,4 @@ rad.json
 *.flf
 #Test results file
 TestResults.xml
-build
-
+build_static
