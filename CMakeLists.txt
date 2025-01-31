@@ -10,15 +10,18 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     set(CMAKE_TOOLCHAIN_FILE "C:/vcpkg/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
 endif()
 
-# Option to choose static or dynamic linking
-option(USE_STATIC_OPENSSL "Build with static OpenSSL" OFF)
+# Option for static or dynamic OpenSSL
+option(USE_STATIC_OPENSSL "Build with static OpenSSL" ON)
 
 if(USE_STATIC_OPENSSL)
-    message(STATUS "Building with Static OpenSSL")
+    message(STATUS "Forcing Static OpenSSL linking...")
     set(OPENSSL_USE_STATIC_LIBS TRUE)
     set(OPENSSL_ROOT_DIR "C:/vcpkg/installed/x64-windows-static")
+
+    # Ensure OpenSSL links statically
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
 else()
-    message(STATUS "Building with Dynamic OpenSSL")
+    message(STATUS "Using Dynamic OpenSSL linking...")
     set(OPENSSL_USE_STATIC_LIBS FALSE)
     set(OPENSSL_ROOT_DIR "C:/vcpkg/installed/x64-windows")
 endif()
@@ -29,7 +32,7 @@ find_package(OpenSSL REQUIRED)
 # Add the source file
 add_executable(ByteAV file-scan.cpp)
 
-# Link OpenSSL libraries
+# Force OpenSSL static linking explicitly
 target_link_libraries(ByteAV PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 
 # Include OpenSSL headers
