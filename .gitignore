@@ -20,4 +20,8 @@ rad.json
 *.flf
 #Test results file
 TestResults.xml
-build_static
+build
+*.csv
+*.exe
+*.vs
+*.dll
