@@ -13,6 +13,9 @@
 #include <thread>
 #include <limits>
 #include <windows.h>
+#include <yara.h>
+#define _CRT_SECURE_NO_WARNINGS
+
 #define NOMINMAX
 using namespace std;
 namespace fs = std::filesystem;
@@ -127,8 +130,54 @@ string computeHash(const string& filePath) {
     return ss.str();
 }
 
-void scanDirectory(const fs::path& dirPath, const unordered_set<string>& malwareHashes,
-    vector<pair<string, string>>& normalFiles, vector<pair<string, string>>& maliciousFiles) {
+YR_RULES* compileYaraRules(const std::string& rulePath) {
+    YR_COMPILER* compiler = nullptr;
+    YR_RULES* rules = nullptr;
+
+    if (yr_initialize() != ERROR_SUCCESS) {
+        std::cerr << "Failed to initialize YARA." << std::endl;
+        return nullptr;
+    }
+
+    if (yr_compiler_create(&compiler) != ERROR_SUCCESS) {
+        std::cerr << "Failed to create YARA compiler." << std::endl;
+        return nullptr;
+    }
+
+    FILE* ruleFile = fopen(rulePath.c_str(), "r");
+    if (!ruleFile) {
+        std::cerr << "Failed to open rule file: " << rulePath << std::endl;
+        return nullptr;
+    }
+
+    int result = yr_compiler_add_file(compiler, ruleFile, nullptr, rulePath.c_str());
+    fclose(ruleFile);
+
+    if (result > 0) {
+        std::cerr << "Failed to compile rule: " << rulePath << std::endl;
+        yr_compiler_destroy(compiler);
+        return nullptr;
+    }
+
+    yr_compiler_get_rules(compiler, &rules);
+    yr_compiler_destroy(compiler);
+    return rules;
+}
+
+int yaraCallback(YR_SCAN_CONTEXT* context, int message, void* message_data, void* user_data) {
+    if (message == CALLBACK_MSG_RULE_MATCHING) {
+        std::string* filePath = static_cast<std::string*>(user_data);
+        std::cout << "[YARA] Match found in file: " << *filePath << std::endl;
+        std::cout << "       Rule matched: " << ((YR_RULE*)message_data)->identifier << std::endl;
+    }
+    return CALLBACK_CONTINUE;
+}
+
+void scanDirectory(const fs::path& dirPath,
+    const unordered_set<string>& malwareHashes,
+    vector<pair<string, string>>& normalFiles,
+    vector<pair<string, string>>& maliciousFiles,
+    YR_RULES* yaraRules) {
     try {
         for (const auto& entry : fs::recursive_directory_iterator(dirPath)) {
             {
@@ -137,7 +186,10 @@ void scanDirectory(const fs::path& dirPath, const unordered_set<string>& malware
             }
             if (fs::is_regular_file(entry.status())) {
                 string fileHash = computeHash(entry.path().string());
-
+                if (yaraRules != nullptr) {
+                    string fullPath = entry.path().string();
+                    yr_rules_scan_file(yaraRules, fullPath.c_str(), 0, yaraCallback, &fullPath, 0);
+                }
                 lock_guard<mutex> lock(printMutex);
                 if (malwareHashes.find(fileHash) != malwareHashes.end()) {
                     maliciousFiles.push_back({ entry.path().string(), fileHash });
@@ -154,6 +206,7 @@ void scanDirectory(const fs::path& dirPath, const unordered_set<string>& malware
         std::cerr << "Error accessing " << dirPath << ": " << e.what() << std::endl;
     }
 }
+
 void monitorDirectory(const string& dirPath, const unordered_set<string>& malwareHashes) {
     HANDLE hDir = CreateFile(
         dirPath.c_str(),
@@ -186,9 +239,8 @@ void monitorDirectory(const string& dirPath, const unordered_set<string>& malwar
             fileName = string(fileNameLength, '\0');
 
             for (int i = 0; i < fileNameLength; i++) {
-                fileName[i] = fileInfo->FileName[i];
+                fileName[i] = static_cast<char>(fileInfo->FileName[i]);
             }
-
             string fullPath = dirPath + "\\" + fileName;
             if (fs::is_regular_file(fullPath)) {
                 string fileHash = computeHash(fullPath);
@@ -244,13 +296,17 @@ int main() {
     if (malwareHashes.empty()) {
         cerr << "Malware database is empty. Scanning without detection enabled." << endl;
     }
+    YR_RULES* yaraRules = compileYaraRules("rules/test_rule.yar");
+    if (!yaraRules) {
+        std::cerr << "YARA rules could not be loaded. Continuing without YARA support." << std::endl;
+    }
     string inputPath;
     cout << "\nEnter the directory path to scan: ";
     getline(cin, inputPath);
     fs::path rootDir(inputPath);
     vector<pair<string, string>> normalFiles;
     vector<pair<string, string>> maliciousFiles;
-    scanDirectory(rootDir, malwareHashes, normalFiles, maliciousFiles);
+    scanDirectory(rootDir, malwareHashes, normalFiles, maliciousFiles, yaraRules);
     printScanResults(normalFiles, maliciousFiles);
     thread monitorThread([&]() {
         while (true) {
