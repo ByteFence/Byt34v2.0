@@ -58,7 +58,7 @@ void handleMaliciousFile(const string& filePath)
     while (true) 
     {
         cout << "\n[ALERT] Malicious file detected: " << filePath << endl;
-        cout << "[Q] Quarantine  |  [D] Delete  |  [S] Skip  ➜  ";
+        cout << "[Q] Quarantine  |  [D] Delete  |  [S] Skip";
         cin >> choice;
         choice = tolower(choice);
         cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
@@ -75,7 +75,7 @@ void handleMaliciousFile(const string& filePath)
             break;
         }
         else {
-            cout << "[ERROR] Invalid choice! Please enter 'Q', 'D', or 'S'.\n";
+            cout << "[ERROR] Invalid choice! Please enter 'Q', 'D', or 'S'\n";
         }
     }
 }
@@ -207,7 +207,7 @@ void scanDirectory(const fs::path& dirPath,
     }
 }
 
-void monitorDirectory(const string& dirPath, const unordered_set<string>& malwareHashes) {
+void monitorDirectory(const string& dirPath, const unordered_set<string>& malwareHashes, YR_RULES* yaraRules) {
     HANDLE hDir = CreateFile(
         dirPath.c_str(),
         FILE_LIST_DIRECTORY,
@@ -254,10 +254,13 @@ void monitorDirectory(const string& dirPath, const unordered_set<string>& malwar
                 else {
                     cout << "[Real-Time Scan] File is clean: " << fullPath << endl;
                 }
+                if (yaraRules != nullptr) {
+                    yr_rules_scan_file(yaraRules, fullPath.c_str(), 0, yaraCallback, &fullPath, 0);
+                }
             }
+
         }
     }
-
     CloseHandle(hDir);
 }
 void printScanResults(const vector<pair<string, string>>& normalFiles, const vector<pair<string, string>>& maliciousFiles) {
@@ -310,7 +313,7 @@ int main() {
     printScanResults(normalFiles, maliciousFiles);
     thread monitorThread([&]() {
         while (true) {
-            monitorDirectory(inputPath, malwareHashes);
+            monitorDirectory(inputPath, malwareHashes,yaraRules);
             this_thread::sleep_for(chrono::seconds(1));
         }
         });
