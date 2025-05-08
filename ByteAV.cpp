@@ -1,323 +1,149 @@
+﻿#include "ByteAV.h"
 #include <iostream>
-#include <thread>
-#include <vector>
-#include <filesystem>
-#include <mutex>
-#include <unordered_set>
-#include <openssl/evp.h>
-#include <windows.h>
 #include <fstream>
 #include <sstream>
 #include <iomanip>
-#include <chrono>
-#include <thread>
-#include <limits>
-#include <windows.h>
+#include <filesystem>
+#include <openssl/evp.h>
+#include <mutex>
 #include <yara.h>
-#define _CRT_SECURE_NO_WARNINGS
 
-#define NOMINMAX
 using namespace std;
 namespace fs = std::filesystem;
 
-std::mutex printMutex;
-const string quarantineFolder = "C:\\ByteAV\\Quarantine\\"; 
-void createQuarantineFolder() {
-    if (!fs::exists(quarantineFolder)) {
-        fs::create_directories(quarantineFolder);
-    }
-}
+std::unordered_set<std::string> yaraMatchedFiles;
+static mutex printMutex;
+static const string quarantineFolder = R"(C:\ByteAV\Quarantine)";
 
-void quarantineFile(const string& filePath) {
-    createQuarantineFolder();
-    fs::path srcPath(filePath);
-    fs::path destPath = quarantineFolder + srcPath.filename().string();
-
+void quarantineFile(const std::string& filePath) {
+    fs::create_directories(quarantineFolder);
+    fs::path dest = fs::path(quarantineFolder) / fs::path(filePath).filename();
     try {
-        fs::rename(srcPath, destPath);
-        cout << "[INFO] File quarantined: " << destPath << endl;
+        fs::rename(filePath, dest);
+        cout << "[INFO] Quarantined " << dest << "\n";
     }
-    catch (const fs::filesystem_error& e) {
-        cerr << "[ERROR] Failed to quarantine file: " << e.what() << endl;
+    catch (...) {
+        cout << "[ERROR] Quarantine failed\n";
     }
 }
 
-void deleteFile(const string& filePath) {
+void deleteFile(const std::string& filePath) {
     try {
         fs::remove(filePath);
-        cout << "[INFO] File deleted: " << filePath << endl;
+        cout << "[INFO] Deleted " << filePath << "\n";
     }
-    catch (const fs::filesystem_error& e) {
-        cerr << "[ERROR] Failed to delete file: " << e.what() << endl;
+    catch (...) {
+        cout << "[ERROR] Delete failed\n";
     }
 }
 
-void handleMaliciousFile(const string& filePath) 
-{
-    char choice;
-    while (true) 
-    {
-        cout << "\n[ALERT] Malicious file detected: " << filePath << endl;
-        cout << "[Q] Quarantine  |  [D] Delete  |  [S] Skip";
-        cin >> choice;
-        choice = tolower(choice);
-        cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
-        if (choice == 'q') {
-            quarantineFile(filePath);
-            break;
-        }
-        else if (choice == 'd') {
-            deleteFile(filePath);
-            break;
-        }
-        else if (choice == 's') {
-            cout << "[INFO] Skipping file: " << filePath << endl;
-            break;
-        }
-        else {
-            cout << "[ERROR] Invalid choice! Please enter 'Q', 'D', or 'S'\n";
-        }
-    }
-}
-unordered_set<string> loadSha256Hashes(const string& filename) {
-    unordered_set<string> hashes;
-    ifstream file(filename);
-    if (!file.is_open()) {
-        cerr << "Error: Could not open " << filename << endl;
-        return hashes;
-    }
+std::unordered_set<std::string> loadSha256Hashes(const std::string& filename) {
+    unordered_set<string> db;
+    ifstream f(filename);
     string line;
-    while (getline(file, line)) {
-        if (!line.empty()) {
-            hashes.insert(line);
-        }
+    while (getline(f, line)) {
+        if (!line.empty()) db.insert(line);
     }
-    file.close();
-    cout << "Loaded " << hashes.size() << " SHA-256 hashes from database." << endl;
-    return hashes;
+    cout << "[INFO] Loaded " << db.size() << " hashes\n";
+    return db;
 }
 
-string computeHash(const string& filePath) {
-    EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
-    if (!mdctx) return "ERROR_CREATING_CTX";
-    if (EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL) != 1) {
-        EVP_MD_CTX_free(mdctx);
-        return "ERROR_INITIALIZING_DIGEST";
+std::string computeHash(const std::string& path) {
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
+    ifstream f(path, ios::binary);
+    char buf[4096];
+    while (f.read(buf, sizeof(buf))) {
+        EVP_DigestUpdate(ctx, buf, f.gcount());
     }
-    ifstream file(filePath, ios::binary);
-    if (!file) {
-        EVP_MD_CTX_free(mdctx);
-        return "ERROR_OPENING_FILE";
-    }
-    char buffer[4096];
-    while (file.read(buffer, sizeof(buffer))) {
-        if (EVP_DigestUpdate(mdctx, buffer, file.gcount()) != 1) {
-            EVP_MD_CTX_free(mdctx);
-            return "ERROR_UPDATING_DIGEST";
-        }
-    }
-    unsigned char hash[EVP_MAX_MD_SIZE];
-    unsigned int length = 0;
-    if (EVP_DigestFinal_ex(mdctx, hash, &length) != 1) {
-        EVP_MD_CTX_free(mdctx);
-        return "ERROR_FINALIZING_DIGEST";
-    }
-    EVP_MD_CTX_free(mdctx);
-    stringstream ss;
-    for (unsigned int i = 0; i < length; i++) {
-        ss << hex << setw(2) << setfill('0') << (int)hash[i];
-    }
+    unsigned char out[EVP_MAX_MD_SIZE];
+    unsigned len = 0;
+    EVP_DigestFinal_ex(ctx, out, &len);
+    EVP_MD_CTX_free(ctx);
+    stringstream ss; ss << hex << setfill('0');
+    for (unsigned i = 0; i < len; i++) ss << setw(2) << (int)out[i];
     return ss.str();
 }
 
+// ------------------ YARA Integration ------------------
+
 YR_RULES* compileYaraRules(const std::string& rulePath) {
-    YR_COMPILER* compiler = nullptr;
-    YR_RULES* rules = nullptr;
-
     if (yr_initialize() != ERROR_SUCCESS) {
-        std::cerr << "Failed to initialize YARA." << std::endl;
+        std::cerr << "YARA init failed\n";
         return nullptr;
     }
 
-    if (yr_compiler_create(&compiler) != ERROR_SUCCESS) {
-        std::cerr << "Failed to create YARA compiler." << std::endl;
+    YR_COMPILER* cmp = nullptr;
+    yr_compiler_create(&cmp);
+    FILE* fp = fopen(rulePath.c_str(), "r");
+    if (!fp) {
+        std::cerr << "Cannot open rule file\n";
+        yr_compiler_destroy(cmp);
         return nullptr;
     }
 
-    FILE* ruleFile = fopen(rulePath.c_str(), "r");
-    if (!ruleFile) {
-        std::cerr << "Failed to open rule file: " << rulePath << std::endl;
+    if (yr_compiler_add_file(cmp, fp, nullptr, rulePath.c_str()) > 0) {
+        std::cerr << "Errors compiling " << rulePath << "\n";
+        fclose(fp);
+        yr_compiler_destroy(cmp);
         return nullptr;
     }
 
-    int result = yr_compiler_add_file(compiler, ruleFile, nullptr, rulePath.c_str());
-    fclose(ruleFile);
-
-    if (result > 0) {
-        std::cerr << "Failed to compile rule: " << rulePath << std::endl;
-        yr_compiler_destroy(compiler);
-        return nullptr;
-    }
-
-    yr_compiler_get_rules(compiler, &rules);
-    yr_compiler_destroy(compiler);
+    fclose(fp);
+    YR_RULES* rules = nullptr;
+    yr_compiler_get_rules(cmp, &rules);
+    yr_compiler_destroy(cmp);
     return rules;
 }
 
-int yaraCallback(YR_SCAN_CONTEXT* context, int message, void* message_data, void* user_data) {
-    if (message == CALLBACK_MSG_RULE_MATCHING) {
-        std::string* filePath = static_cast<std::string*>(user_data);
-        std::cout << "[YARA] Match found in file: " << *filePath << std::endl;
-        std::cout << "       Rule matched: " << ((YR_RULE*)message_data)->identifier << std::endl;
+int yaraCallback(YR_SCAN_CONTEXT*, int msg, void* message_data, void* user_data) {
+    if (msg != CALLBACK_MSG_RULE_MATCHING) return CALLBACK_CONTINUE;
+    auto* filePath = static_cast<string*>(user_data);
+    auto* rule = reinterpret_cast<YR_RULE*>(message_data);
+
+    yaraMatchedFiles.insert(*filePath);
+
+    // optional logging
+    fs::create_directory("yara_logs");
+    std::ofstream log("yara_logs/" + fs::path(*filePath).stem().string() + ".txt", ios::app);
+    log << "File: " << *filePath << "\n";
+    log << "Matched Rule: " << rule->identifier << "\n";
+
+    if (rule->tags) {
+        const char* p = rule->tags;
+        while (*p != '\0') {
+            log << p << ": TRUE\n";
+            p += std::strlen(p) + 1;
+        }
     }
+
+    log << "--------------------------------\n";
     return CALLBACK_CONTINUE;
 }
 
-void scanDirectory(const fs::path& dirPath,
-    const unordered_set<string>& malwareHashes,
-    vector<pair<string, string>>& normalFiles,
-    vector<pair<string, string>>& maliciousFiles,
-    YR_RULES* yaraRules) {
-    try {
-        for (const auto& entry : fs::recursive_directory_iterator(dirPath)) {
-            {
-                std::lock_guard<std::mutex> lock(printMutex);
-                std::cout << "Scanning: " << entry.path() << std::endl;
-            }
-            if (fs::is_regular_file(entry.status())) {
-                string fileHash = computeHash(entry.path().string());
-                if (yaraRules != nullptr) {
-                    string fullPath = entry.path().string();
-                    yr_rules_scan_file(yaraRules, fullPath.c_str(), 0, yaraCallback, &fullPath, 0);
-                }
-                lock_guard<mutex> lock(printMutex);
-                if (malwareHashes.find(fileHash) != malwareHashes.end()) {
-                    maliciousFiles.push_back({ entry.path().string(), fileHash });
-                    handleMaliciousFile(entry.path().string());
-                }
-                else {
-                    normalFiles.push_back({ entry.path().string(), fileHash });
-                }
-            }
+// ------------------ Scan With YARA + SHA256 ------------------
+
+void scanDirectory(const fs::path& dir,
+    const unordered_set<string>& db,
+    vector<pair<string, string>>& normal,
+    vector<pair<string, string>>& malicious,
+    YR_RULES* yaraRules)
+{
+    for (const auto& e : fs::recursive_directory_iterator(dir)) {
+        if (!fs::is_regular_file(e.status())) continue;
+        auto p = e.path().string();
+        auto h = computeHash(p);
+        if (yaraRules) {
+            yr_rules_scan_file(yaraRules, p.c_str(), 0, yaraCallback, &p, 0);
+        }
+
+        lock_guard<mutex> lk(printMutex);
+        cout << "Scanning: " << p << "\n";
+        if (db.count(h) || yaraMatchedFiles.count(p)) {
+            malicious.emplace_back(p, h);
+        }
+        else {
+            normal.emplace_back(p, h);
         }
     }
-    catch (const fs::filesystem_error& e) {
-        std::lock_guard<std::mutex> lock(printMutex);
-        std::cerr << "Error accessing " << dirPath << ": " << e.what() << std::endl;
-    }
-}
-
-void monitorDirectory(const string& dirPath, const unordered_set<string>& malwareHashes, YR_RULES* yaraRules) {
-    HANDLE hDir = CreateFile(
-        dirPath.c_str(),
-        FILE_LIST_DIRECTORY,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        NULL,
-        OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS,
-        NULL);
-
-    if (hDir == INVALID_HANDLE_VALUE) {
-        cerr << "Error: Unable to monitor directory!" << endl;
-        return;
-    }
-
-    char buffer[1024];
-    DWORD bytesReturned;
-    FILE_NOTIFY_INFORMATION* fileInfo;
-    string fileName;
-
-    cout << "\n[Real-Time Scan] Monitoring directory: " << dirPath << endl;
-
-    while (true) {
-        if (ReadDirectoryChangesW(hDir, buffer, sizeof(buffer), TRUE,
-            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE,
-            &bytesReturned, NULL, NULL)) {
-
-            fileInfo = (FILE_NOTIFY_INFORMATION*)buffer;
-            int fileNameLength = fileInfo->FileNameLength / 2;
-            fileName = string(fileNameLength, '\0');
-
-            for (int i = 0; i < fileNameLength; i++) {
-                fileName[i] = static_cast<char>(fileInfo->FileName[i]);
-            }
-            string fullPath = dirPath + "\\" + fileName;
-            if (fs::is_regular_file(fullPath)) {
-                string fileHash = computeHash(fullPath);
-
-                lock_guard<mutex> lock(printMutex);
-                cout << "\n[Real-Time Scan] New file detected: " << fullPath << " | Hash: " << fileHash << endl;
-
-                if (malwareHashes.find(fileHash) != malwareHashes.end()) {
-                    cout << "WARNING: Malicious file detected - " << fullPath << endl;
-                }
-                else {
-                    cout << "[Real-Time Scan] File is clean: " << fullPath << endl;
-                }
-                if (yaraRules != nullptr) {
-                    yr_rules_scan_file(yaraRules, fullPath.c_str(), 0, yaraCallback, &fullPath, 0);
-                }
-            }
-
-        }
-    }
-    CloseHandle(hDir);
-}
-void printScanResults(const vector<pair<string, string>>& normalFiles, const vector<pair<string, string>>& maliciousFiles) {
-    if (!normalFiles.empty()) {
-        cout << "\nScanned Normal Files:" << endl;
-        cout << "-------------------------------------------------" << endl;
-        cout << left << setw(40) << "Filename" << " | " << "File Hash" << endl;
-        cout << "-------------------------------------------------" << endl;
-        for (const auto& file : normalFiles) {
-            cout << left << setw(40) << file.first << " | " << file.second << endl;
-        }
-        cout << "-------------------------------------------------" << endl;
-    }
-
-    if (!maliciousFiles.empty()) {
-        cout << "\nMalicious Files Detected:" << endl;
-        cout << "-------------------------------------------------" << endl;
-        cout << left << setw(40) << "Filename" << " | " << "File Hash" << endl;
-        cout << "-------------------------------------------------" << endl;
-        for (const auto& file : maliciousFiles) {
-            cout << left << setw(40) << file.first << " | " << file.second << endl;
-        }
-        cout << "-------------------------------------------------" << endl;
-    }
-    else {
-        cout << "\nNo malicious files detected!" << endl;
-    }
-}
-
-int main() {
-    cout << "==========================================" << endl;
-    cout << "Welcome to Byt34V - Simple Antivirus Scanner" << endl;
-    cout << "==========================================" << endl << endl;
-    string malwareDB = "sha256_only.csv";
-    unordered_set<string> malwareHashes = loadSha256Hashes(malwareDB);
-    if (malwareHashes.empty()) {
-        cerr << "Malware database is empty. Scanning without detection enabled." << endl;
-    }
-    YR_RULES* yaraRules = compileYaraRules("rules/test_rule.yar");
-    if (!yaraRules) {
-        std::cerr << "YARA rules could not be loaded. Continuing without YARA support." << std::endl;
-    }
-    string inputPath;
-    cout << "\nEnter the directory path to scan: ";
-    getline(cin, inputPath);
-    fs::path rootDir(inputPath);
-    vector<pair<string, string>> normalFiles;
-    vector<pair<string, string>> maliciousFiles;
-    scanDirectory(rootDir, malwareHashes, normalFiles, maliciousFiles, yaraRules);
-    printScanResults(normalFiles, maliciousFiles);
-    thread monitorThread([&]() {
-        while (true) {
-            monitorDirectory(inputPath, malwareHashes,yaraRules);
-            this_thread::sleep_for(chrono::seconds(1));
-        }
-        });
-    cout << "\n[INFO] Initial Scan Completed! Real-time monitoring is ACTIVE...\n";
-    monitorThread.join();
-    return 0;
 }

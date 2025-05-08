@@ -2,41 +2,50 @@
 project(ByteAV)
 
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-# 🔧 Force static runtime (/MT instead of /MD)
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")  # /MTd in Debug, /MT in Release
-
-# Use vcpkg toolchain if not already set
+# vcpkg toolchain
 if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
-    set(CMAKE_TOOLCHAIN_FILE "C:/vcpkg/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
+  set(CMAKE_TOOLCHAIN_FILE "C:/vcpkg/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
 endif()
 
-# ✅ Force static OpenSSL
-set(OPENSSL_USE_STATIC_LIBS TRUE)
-set(OPENSSL_ROOT_DIR "C:/vcpkg/installed/x64-windows-static")
-
-# 📦 Find OpenSSL
+# Dependencies
 find_package(OpenSSL REQUIRED)
+find_package(glfw3   REQUIRED)
+find_package(OpenGL  REQUIRED)
 
-# 🔍 Manually find YARA headers + libs (static)
-find_path(YARA_INCLUDE_DIRS
-    NAMES yara.h
-    PATHS "C:/vcpkg/installed/x64-windows-static/include"
-)
+# YARA headers + lib
+find_path(YARA_INCLUDE_DIR NAMES yara.h PATHS "C:/vcpkg/installed/x64-windows-static/include/yara")
+find_library(YARA_LIB NAMES yara PATHS "C:/vcpkg/installed/x64-windows-static/lib")
 
-find_library(YARA_LIBRARIES
-    NAMES yara
-    PATHS "C:/vcpkg/installed/x64-windows-static/lib"
-)
-
-if(NOT YARA_INCLUDE_DIRS OR NOT YARA_LIBRARIES)
-    message(FATAL_ERROR "YARA not found. Please install with vcpkg.")
+if(NOT YARA_INCLUDE_DIR OR NOT YARA_LIB)
+  message(FATAL_ERROR "YARA library not found. Check include dir: ${YARA_INCLUDE_DIR} and lib: ${YARA_LIB}")
 endif()
 
-# 🔨 Build ByteAV
-add_executable(ByteAV ByteAV.cpp)
+# ImGui sources
+file(GLOB IMGUI_SRC
+    imgui/*.cpp
+    imgui/backends/imgui_impl_glfw.cpp
+    imgui/backends/imgui_impl_opengl3.cpp
+)
 
-# ✅ Link OpenSSL + YARA statically
-target_include_directories(ByteAV PRIVATE ${YARA_INCLUDE_DIRS})
-target_link_libraries(ByteAV PRIVATE OpenSSL::SSL OpenSSL::Crypto ${YARA_LIBRARIES})
+# Main target
+add_executable(ByteAV main.cpp ByteAV.cpp ${IMGUI_SRC})
+
+# Include directories
+target_include_directories(ByteAV PRIVATE
+    imgui
+    imgui/backends
+    ${YARA_INCLUDE_DIR}
+)
+get_target_property(OSSL_INC OpenSSL::Crypto INTERFACE_INCLUDE_DIRECTORIES)
+target_include_directories(ByteAV PRIVATE ${OSSL_INC})
+
+# Link libraries
+target_link_libraries(ByteAV PRIVATE
+    glfw
+    OpenGL::GL
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    ${YARA_LIB}
+)
