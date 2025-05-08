@@ -1,4 +1,5 @@
-﻿#include "ByteAV.h"
+﻿#define _CRT_SECURE_NO_WARNINGS
+#include "ByteAV.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -8,11 +9,12 @@
 #include <mutex>
 #include <yara.h>
 
+
 using namespace std;
 namespace fs = std::filesystem;
 
 std::unordered_set<std::string> yaraMatchedFiles;
-static mutex printMutex;
+static std::mutex printMutex;
 static const string quarantineFolder = R"(C:\ByteAV\Quarantine)";
 
 void quarantineFile(const std::string& filePath) {
@@ -20,38 +22,40 @@ void quarantineFile(const std::string& filePath) {
     fs::path dest = fs::path(quarantineFolder) / fs::path(filePath).filename();
     try {
         fs::rename(filePath, dest);
-        cout << "[INFO] Quarantined " << dest << "\n";
+        std::lock_guard<std::mutex> lk(printMutex);
+        std::cout << "[INFO] Quarantined " << dest << "\n";
     }
     catch (...) {
-        cout << "[ERROR] Quarantine failed\n";
+        std::cerr << "[ERROR] Quarantine failed\n";
     }
 }
 
 void deleteFile(const std::string& filePath) {
     try {
         fs::remove(filePath);
-        cout << "[INFO] Deleted " << filePath << "\n";
+        std::lock_guard<std::mutex> lk(printMutex);
+        std::cout << "[INFO] Deleted " << filePath << "\n";
     }
     catch (...) {
-        cout << "[ERROR] Delete failed\n";
+        std::cerr << "[ERROR] Delete failed\n";
     }
 }
 
 std::unordered_set<std::string> loadSha256Hashes(const std::string& filename) {
-    unordered_set<string> db;
-    ifstream f(filename);
-    string line;
+    std::unordered_set<std::string> db;
+    std::ifstream f(filename);
+    std::string line;
     while (getline(f, line)) {
         if (!line.empty()) db.insert(line);
     }
-    cout << "[INFO] Loaded " << db.size() << " hashes\n";
+    std::cout << "[INFO] Loaded " << db.size() << " hashes\n";
     return db;
 }
 
 std::string computeHash(const std::string& path) {
     EVP_MD_CTX* ctx = EVP_MD_CTX_new();
     EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
-    ifstream f(path, ios::binary);
+    std::ifstream f(path, std::ios::binary);
     char buf[4096];
     while (f.read(buf, sizeof(buf))) {
         EVP_DigestUpdate(ctx, buf, f.gcount());
@@ -60,12 +64,12 @@ std::string computeHash(const std::string& path) {
     unsigned len = 0;
     EVP_DigestFinal_ex(ctx, out, &len);
     EVP_MD_CTX_free(ctx);
-    stringstream ss; ss << hex << setfill('0');
-    for (unsigned i = 0; i < len; i++) ss << setw(2) << (int)out[i];
+
+    std::ostringstream ss;
+    ss << std::hex << std::setfill('0');
+    for (unsigned i = 0; i < len; i++) ss << std::setw(2) << (int)out[i];
     return ss.str();
 }
-
-// ------------------ YARA Integration ------------------
 
 YR_RULES* compileYaraRules(const std::string& rulePath) {
     if (yr_initialize() != ERROR_SUCCESS) {
@@ -76,6 +80,7 @@ YR_RULES* compileYaraRules(const std::string& rulePath) {
     YR_COMPILER* cmp = nullptr;
     yr_compiler_create(&cmp);
     FILE* fp = fopen(rulePath.c_str(), "r");
+
     if (!fp) {
         std::cerr << "Cannot open rule file\n";
         yr_compiler_destroy(cmp);
@@ -98,14 +103,13 @@ YR_RULES* compileYaraRules(const std::string& rulePath) {
 
 int yaraCallback(YR_SCAN_CONTEXT*, int msg, void* message_data, void* user_data) {
     if (msg != CALLBACK_MSG_RULE_MATCHING) return CALLBACK_CONTINUE;
-    auto* filePath = static_cast<string*>(user_data);
+    auto* filePath = static_cast<std::string*>(user_data);
     auto* rule = reinterpret_cast<YR_RULE*>(message_data);
 
     yaraMatchedFiles.insert(*filePath);
 
-    // optional logging
     fs::create_directory("yara_logs");
-    std::ofstream log("yara_logs/" + fs::path(*filePath).stem().string() + ".txt", ios::app);
+    std::ofstream log("yara_logs/" + fs::path(*filePath).stem().string() + ".txt", std::ios::app);
     log << "File: " << *filePath << "\n";
     log << "Matched Rule: " << rule->identifier << "\n";
 
@@ -121,14 +125,11 @@ int yaraCallback(YR_SCAN_CONTEXT*, int msg, void* message_data, void* user_data)
     return CALLBACK_CONTINUE;
 }
 
-// ------------------ Scan With YARA + SHA256 ------------------
-
 void scanDirectory(const fs::path& dir,
-    const unordered_set<string>& db,
-    vector<pair<string, string>>& normal,
-    vector<pair<string, string>>& malicious,
-    YR_RULES* yaraRules)
-{
+    const std::unordered_set<std::string>& db,
+    std::vector<std::pair<std::string, std::string>>& normal,
+    std::vector<std::pair<std::string, std::string>>& malicious,
+    YR_RULES* yaraRules) {
     for (const auto& e : fs::recursive_directory_iterator(dir)) {
         if (!fs::is_regular_file(e.status())) continue;
         auto p = e.path().string();
@@ -137,8 +138,8 @@ void scanDirectory(const fs::path& dir,
             yr_rules_scan_file(yaraRules, p.c_str(), 0, yaraCallback, &p, 0);
         }
 
-        lock_guard<mutex> lk(printMutex);
-        cout << "Scanning: " << p << "\n";
+        std::lock_guard<std::mutex> lk(printMutex);
+        std::cout << "Scanning: " << p << "\n";
         if (db.count(h) || yaraMatchedFiles.count(p)) {
             malicious.emplace_back(p, h);
         }

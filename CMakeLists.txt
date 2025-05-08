@@ -30,7 +30,13 @@ file(GLOB IMGUI_SRC
 )
 
 # Main target
-add_executable(ByteAV main.cpp ByteAV.cpp ${IMGUI_SRC})
+add_executable(ByteAV 
+    main.cpp 
+    ByteAV.cpp 
+    monitor.cpp 
+    byteav_yara_util.cpp 
+    ${IMGUI_SRC}
+)
 
 # Include directories
 target_include_directories(ByteAV PRIVATE
