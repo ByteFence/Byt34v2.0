@@ -23,11 +23,14 @@ static float cpuData[100] = { 0.0f };
 static int dataOffset = 0;
 static auto lastCpuSample = std::chrono::steady_clock::now();
 static std::mutex resultsMutex;
+bool showBlinkNotification = false;
+float blinkTimer = 0.0f;
+bool blinkVisible = true;
+int maliciousCount = 0;
+int cleanCount = 0;
 
-// Make malware hashes available globally
 std::unordered_set<std::string> malwareHashes;
 
-// Currently monitored directory
 static std::string monitoredDirectory;
 static bool isMonitoring = false;
 static std::atomic<bool> stopMonitor{ false };
@@ -54,7 +57,6 @@ float GetCPUUsage() {
     ULONGLONG total = kernelDiff + userDiff;
     return total ? 100.0f * (1.0f - ((float)idleDiff / total)) : 0.0f;
 }
-
 // Fixed startMonitoring function from main.cpp
 // Fixed startMonitoring function
 void startMonitoring(const std::string& dirPath, YR_RULES* yaraRules) {
@@ -134,7 +136,6 @@ int main(int argc, char** argv) {
     malwareHashes = loadSha256Hashes("sha256_only.csv");
     std::filesystem::create_directory("scandir");
 
-    // Default monitored directory
     std::string defaultMonitorDir = "scandir";
     logs.push_back("[INFO] Default monitoring directory: " + defaultMonitorDir);
 
@@ -163,15 +164,29 @@ int main(int argc, char** argv) {
 
     static char dirPath[256] = "C:\\";
     static char monitorPath[256] = "scandir";
+
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
-
         ImGui::Begin("ByteAV Scanner");
+        ImGui::Dummy(ImVec2(0, 5)); // small vertical gap
+        if (showBlinkNotification) {
+            blinkTimer += ImGui::GetIO().DeltaTime;
+            if (blinkTimer > 0.5f) {
+                blinkVisible = !blinkVisible;
+                blinkTimer = 0.0f;
+            }
 
-        // Scan section
+            ImVec4 redColor = ImVec4(1.0f, 0.2f, 0.2f, 1.0f);
+            ImVec4 transparentColor = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+
+            // Reserve fixed height to prevent layout shifting
+            ImGui::PushStyleColor(ImGuiCol_Text, blinkVisible ? redColor : transparentColor);
+            ImGui::Text("[ALERT] Malicious file detected!");
+            ImGui::PopStyleColor();
+        }
         ImGui::Text("Scan Settings");
         ImGui::InputText("Scan Directory", dirPath, IM_ARRAYSIZE(dirPath));
         if (ImGui::Button("Start Scan")) {
@@ -183,13 +198,14 @@ int main(int argc, char** argv) {
             std::thread scanThread([&]() {
                 std::vector<std::pair<std::string, std::string>> normalFiles, maliciousFiles;
                 std::filesystem::path root(dirPath);
-
                 if (!std::filesystem::exists(root)) {
                     status = "Error: Directory does not exist";
                     scanProgress = 1.0f;
                     return;
                 }
 
+                maliciousCount = 0;
+                cleanCount = 0;
                 size_t total = std::distance(std::filesystem::recursive_directory_iterator(root), {});
                 size_t count = 0;
 
@@ -210,22 +226,27 @@ int main(int argc, char** argv) {
                     if (malwareHashes.count(hash) || yaraMatchedFiles.count(filepath)) {
                         maliciousFiles.emplace_back(filepath, hash);
                         logs.emplace_back("[MALICIOUS] " + filepath);
+                        maliciousCount++;
+                        showBlinkNotification = true;
                     }
                     else {
                         normalFiles.emplace_back(filepath, hash);
                         logs.emplace_back("[CLEAN] " + filepath);
+                        cleanCount++;
                     }
+
                     count++;
                     scanProgress = static_cast<float>(count) / total;
                 }
 
-                std::lock_guard<std::mutex> lock(resultsMutex);
-                scanResults.insert(scanResults.end(), maliciousFiles.begin(), maliciousFiles.end());
-                scanResults.insert(scanResults.end(), normalFiles.begin(), normalFiles.end());
+                {
+                    std::lock_guard<std::mutex> lock(resultsMutex);
+                    scanResults.insert(scanResults.end(), maliciousFiles.begin(), maliciousFiles.end());
+                    scanResults.insert(scanResults.end(), normalFiles.begin(), normalFiles.end());
+                }
                 status = "Scan Complete.";
                 scanProgress = 1.0f;
 
-                // Automatically start monitoring the scanned directory
                 strcpy(monitorPath, dirPath);
                 });
             scanThread.detach();
@@ -235,10 +256,8 @@ int main(int argc, char** argv) {
         ImGui::ProgressBar(scanProgress);
         ImGui::Separator();
 
-        // Monitor section
         ImGui::Text("Active Monitoring");
         ImGui::InputText("Monitor Directory", monitorPath, IM_ARRAYSIZE(monitorPath));
-
         ImGui::BeginGroup();
         if (!isMonitoring) {
             if (ImGui::Button("Start Monitoring")) {
@@ -255,7 +274,6 @@ int main(int argc, char** argv) {
         ImGui::EndGroup();
 
         ImGui::Separator();
-
         ImGui::Text("Results:");
         ImGui::BeginChild("Results", ImVec2(0, 200), true);
         for (const auto& res : scanResults) {
@@ -266,6 +284,17 @@ int main(int argc, char** argv) {
             ImGui::PopStyleColor();
         }
         ImGui::EndChild();
+
+        ImGui::Separator();
+        ImGui::Text("Statistics:");
+        float totalScanned = maliciousCount + cleanCount;
+        if (totalScanned > 0.0f) {
+            float values[] = { (float)cleanCount / totalScanned, (float)maliciousCount / totalScanned };
+            ImGui::PlotHistogram("Malicious vs Clean", values, 2, 0, nullptr, 0.0f, 1.0f, ImVec2(0, 100));
+            ImGui::Text("Total Scanned: %d", (int)totalScanned);
+            ImGui::Text("Clean Files: %d", cleanCount);
+            ImGui::Text("Malicious Files: %d", maliciousCount);
+        }
 
         MEMORYSTATUSEX mem = { sizeof(mem) };
         GlobalMemoryStatusEx(&mem);
@@ -296,7 +325,6 @@ int main(int argc, char** argv) {
         glfwSwapBuffers(window);
     }
 
-    // Clean up
     stopMonitoring();
     destroyYaraRules(yaraRules);
     ImGui_ImplOpenGL3_Shutdown();
