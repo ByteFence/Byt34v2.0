@@ -18,6 +18,7 @@
 #include <mutex>
 #include <cmath> // for entropy calculation
 #include <fstream> // for std::ifstream
+#include <algorithm>
 
 // Use forward declarations instead of redefining structs
 struct YR_RULES;
@@ -534,44 +535,66 @@ int main(int argc, char** argv) {
         ImGui::NewFrame();
 
         if (showStartupScreen) {
-            // — Splash / Welcome Screen —
-            ImGui::Begin("ByteAV - Welcome", nullptr,
-                ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
-            ImGui::SetWindowSize(ImVec2(600, 300));
-            ImGui::SetWindowPos(ImVec2(200, 200));
+            // ─── Centered Splash Window ───────────────────────────────────────
+            ImGui::SetNextWindowSize(ImVec2(600, 400), ImGuiCond_Always);
+            ImGui::SetNextWindowPos(
+                ImVec2((io.DisplaySize.x - 600) * 0.5f,
+                    (io.DisplaySize.y - 400) * 0.5f),
+                ImGuiCond_Always
+            );
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.05f, 0.05f, 0.08f, 1.00f));
+            ImGui::Begin("##Splash", nullptr, ImGuiWindowFlags_NoDecoration);
+            ImGui::PopStyleColor();
 
-            // 1) Enlarge the header
-            ImGui::SetWindowFontScale(1.3f);
-            ImGui::Text("ByteAV  v1.0");
-            ImGui::Text("Real-Time Threat Intelligence Engine Initialized");
-            ImGui::SetWindowFontScale(1.0f);   // back to normal for the details
-
-            // 2) Status lines (styled)
-            ImGui::TextColored(ImVec4(0.2f, 0.8f, 1.0f, 1.0f),
-                startupTimer < 1.0f ? "loading... Hash DB" : "[OK] Hash DB Loaded");
-            ImGui::TextColored(ImVec4(0.2f, 0.8f, 1.0f, 1.0f),
-                startupTimer < 2.0f ? "loading... YARA" : "[OK] YARA Rules Active");
-            ImGui::TextColored(ImVec4(0.2f, 0.8f, 1.0f, 1.0f),
-                startupTimer < 3.0f ? "loading... Monitor" : "[OK] Live Monitoring Ready");
-            if (startupTimer >= 4.0f) {
-                ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f),
-                    "[INFO] Loaded %zu hashes", malwareHashes.size());
+            // ─── Big Title ────────────────────────────────────────────────────
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.9f, 0.6f, 1.00f));
+            ImGui::SetWindowFontScale(2.0f);
+            {
+                const char* title = "ByteAV";
+                float txtW = ImGui::CalcTextSize(title).x;
+                ImGui::SetCursorPosX((600 - txtW) * 0.5f);
+                ImGui::TextUnformatted(title);
             }
+            ImGui::SetWindowFontScale(1.0f);
+            ImGui::PopStyleColor();
 
-            // advance the timer (for styling only—you no longer auto-close)
-            startupTimer += ImGui::GetIO().DeltaTime;
+            ImGui::Dummy(ImVec2(0, 10));
 
-            // 3) “Enter ByteAV” button to dismiss splash
+            // ─── Subtitle ─────────────────────────────────────────────────────
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.00f));
+            {
+                const char* sub = "Real-Time Threat Intelligence Engine";
+                float txtW = ImGui::CalcTextSize(sub).x;
+                ImGui::SetCursorPosX((600 - txtW) * 0.5f);
+                ImGui::TextUnformatted(sub);
+            }
+            ImGui::PopStyleColor();
+
             ImGui::Dummy(ImVec2(0, 20));
-            if (ImGui::Button("Enter ByteAV", ImVec2(200, 0))) {
-                showStartupScreen = false;
+
+            // ─── Loading Progress Bar ─────────────────────────────────────────
+            float progress = std::min(startupTimer / 4.0f, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.2f, 0.7f, 0.3f, 1.00f));
+            ImGui::ProgressBar(progress, ImVec2(-1, 0));
+            ImGui::PopStyleColor();
+
+            ImGui::Dummy(ImVec2(0, 20));
+
+            // ─── Enter Button (after full load) ──────────────────────────────
+            if (progress >= 1.0f) {
+                if (ImGui::Button("Enter ByteAV", ImVec2(-1, 0))) {
+                    showStartupScreen = false;
+                }
             }
 
+            // ─── Advance Timer ────────────────────────────────────────────────
+            startupTimer += ImGui::GetIO().DeltaTime;
             ImGui::End();
         }
         else {
             renderScannerGUI(yaraRules);
         }
+
 
 
         ImGui::Render();
