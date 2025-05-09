@@ -1,4 +1,5 @@
 ﻿#define _CRT_SECURE_NO_WARNINGS
+#define NOMINMAX  // Add this to avoid conflicts with Windows.h min/max macros
 #include <string>
 #include "ByteAV.h"
 #include "monitor.h"
@@ -17,7 +18,10 @@
 #include <cmath> // for entropy calculation
 #include <fstream> // for std::ifstream
 
-static std::string status = "Idle";
+// Use forward declarations instead of redefining structs
+struct YR_RULES;
+struct YR_SCAN_CONTEXT;
+std::string status = "Idle";
 std::vector<std::pair<std::string, std::string>> scanResults;
 std::vector<std::string> logs;
 static float scanProgress = 0.0f;
@@ -31,14 +35,10 @@ bool blinkVisible = true;
 int maliciousCount = 0;
 int cleanCount = 0;
 
-std::unordered_set<std::string> malwareHashes;
-
 static std::string monitoredDirectory;
 static bool isMonitoring = false;
 static std::atomic<bool> stopMonitor{ false };
 static std::thread monitorThread;
-
-extern void scanFileWithYara(const std::string& filePath, YR_RULES* rules);
 
 float GetCPUUsage() {
     static ULARGE_INTEGER lastIdleTime = {}, lastKernelTime = {}, lastUserTime = {};
@@ -72,6 +72,9 @@ float calculateEntropy(const std::string& filepath) {
     }
     file.close();
 
+    // Prevent division by zero
+    if (buffer.empty()) return 0.0f;
+
     int counts[256] = {};
     for (unsigned char byte : buffer) counts[byte]++;
 
@@ -93,7 +96,6 @@ int calculateThreatScore(bool yaraMatch, bool hashMatch, float entropy) {
     return score;
 }
 
-// Fixed startMonitoring function from main.cpp
 // Fixed startMonitoring function
 void startMonitoring(const std::string& dirPath, YR_RULES* yaraRules) {
     try {
@@ -143,7 +145,7 @@ void startMonitoring(const std::string& dirPath, YR_RULES* yaraRules) {
     }
 }
 
-// Fixed stopMonitoring function from main.cpp
+// Fixed stopMonitoring function
 void stopMonitoring() {
     if (isMonitoring) {
         stopMonitor.store(true);
@@ -157,6 +159,7 @@ void stopMonitoring() {
         status = "Idle";
     }
 }
+
 void renderScannerGUI(YR_RULES* yaraRules) {
     static char dirPath[256] = "C:\\";
     static char monitorPath[256] = "scandir";
@@ -199,63 +202,149 @@ void renderScannerGUI(YR_RULES* yaraRules) {
         scanResults.clear();
         logs.clear();
         scanProgress = 0.0f;
+        showBlinkNotification = false; // Reset notification state
 
-        std::thread scanThread([&]() {
-            std::vector<std::pair<std::string, std::string>> normalFiles, maliciousFiles;
-            std::string safeDir(dirPath);
-            std::filesystem::path root(safeDir);
-            if (!std::filesystem::exists(root)) {
-                status = "Error: Directory does not exist";
+        std::thread scanThread([safeDir, yaraRules]() { // Fixed: Capture by value instead of reference
+            try {
+                std::filesystem::path root(safeDir);
+                std::vector<std::pair<std::string, std::string>> maliciousFiles;
+                std::vector<std::pair<std::string, std::string>> normalFiles;
+
+
+                // 1) Early-exit: directory doesn't exist
+                if (!std::filesystem::exists(root)) {
+                    {
+                        // Scoped lock_guard so it always releases before return
+                        std::lock_guard<std::mutex> lock(resultsMutex);
+                        status = "Error: Directory does not exist";
+                        scanProgress = 1.0f;
+                    }
+                    return;
+                }
+                size_t total = 0;
+                try {
+                    total = std::distance(
+                        std::filesystem::recursive_directory_iterator(root),
+                        std::filesystem::recursive_directory_iterator());
+                }
+                catch (const std::exception& e) {
+                    {
+                        std::lock_guard<std::mutex> lock(resultsMutex);
+                        logs.push_back(std::string("[ERROR] Failed to count files: ") + e.what());
+                    }
+                    status = "Error: Failed to count files";
+                    scanProgress = 1.0f;
+                    return;
+                }
+
+                if (total == 0) total = 1; // Prevent division by zero
+
+                size_t count = 0;
+                int localMaliciousCount = 0;
+                int localCleanCount = 0;
+
+                try {
+                    for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
+                        if (!std::filesystem::is_regular_file(entry)) {
+                            count++;
+                            continue;
+                        }
+
+                        std::string filepath = entry.path().string();
+                        std::string hash;
+
+                        try {
+                            hash = computeHash(filepath);
+                        }
+                        catch (const std::exception& e) {
+                            {
+                                std::lock_guard<std::mutex> lock(resultsMutex);
+                                logs.push_back("[ERROR] Failed to compute hash for " + filepath + ": " + e.what());
+                            }
+                            count++;
+                            continue;
+                        }
+
+                        float entropy = 0.0f;
+                        try {
+                            entropy = calculateEntropy(filepath);
+                        }
+                        catch (const std::exception& e) {
+                            {
+                                std::lock_guard<std::mutex> lock(resultsMutex);
+                                logs.push_back("[ERROR] Failed to calculate entropy for " + filepath + ": " + e.what());
+                            }
+                        }
+
+                        bool yaraMatch = false;
+                        if (yaraRules) {
+                            try {
+                                // Check if file is accessible before scanning
+                                std::ifstream testFile(filepath);
+                                if (testFile.good()) {
+                                    testFile.close();
+                                    // Using string object instead of address
+                                    std::string filePath = filepath;
+                                    yr_rules_scan_file(yaraRules, filepath.c_str(), 0, yaraCallback,
+                                        &filePath, 0);
+                                    yaraMatch = yaraMatchedFiles.count(filepath) > 0;
+                                }
+                            }
+                            catch (const std::exception& e) {
+                                {
+                                    std::lock_guard<std::mutex> lock(resultsMutex);
+                                    logs.push_back("[ERROR] Failed to scan with YARA for " + filepath + ": " + e.what());
+                                }
+                            }
+                        }
+
+                        bool hashMatch = malwareHashes.count(hash) > 0;
+                        int score = calculateThreatScore(yaraMatch, hashMatch, entropy);
+
+                        {
+                            std::lock_guard<std::mutex> lock(resultsMutex);
+                            if (yaraMatch || hashMatch) {
+                                maliciousFiles.emplace_back(filepath, hash);
+                                logs.emplace_back("[MALICIOUS] " + filepath + " | Score: " +
+                                    std::to_string(score) + " | Entropy: " + std::to_string(entropy));
+                                localMaliciousCount++;
+                                showBlinkNotification = true;
+                            }
+                            else {
+                                normalFiles.emplace_back(filepath, hash);
+                                logs.emplace_back("[CLEAN] " + filepath + " | Entropy: " + std::to_string(entropy));
+                                localCleanCount++;
+                            }
+                        }
+
+                        count++;
+                        scanProgress = static_cast<float>(count) / total;
+                    }
+
+                    {
+                        std::lock_guard<std::mutex> lock(resultsMutex);
+                        scanResults.insert(scanResults.end(), maliciousFiles.begin(), maliciousFiles.end());
+                        scanResults.insert(scanResults.end(), normalFiles.begin(), normalFiles.end());
+                        maliciousCount = localMaliciousCount;
+                        cleanCount = localCleanCount;
+                        status = "Scan Complete.";
+                        scanProgress = 1.0f;
+                    }
+                }
+                catch (const std::exception& e) {
+                    std::lock_guard<std::mutex> lock(resultsMutex);
+                    logs.push_back("[ERROR] Scan error: " + std::string(e.what()));
+                    status = "Error during scan";
+                    scanProgress = 1.0f;
+                }
+            }
+            catch (const std::exception& e) {
+                // Outer catch: no early return here, so plain lock_guard is fine
+                std::lock_guard<std::mutex> lock(resultsMutex);
+                logs.push_back(std::string("[CRITICAL] Thread error: ") + e.what());
+                status = "Critical error";
                 scanProgress = 1.0f;
-                return;
             }
-
-            maliciousCount = 0;
-            cleanCount = 0;
-            size_t total = std::distance(std::filesystem::recursive_directory_iterator(root), {});
-            size_t count = 0;
-
-            for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
-                if (!std::filesystem::is_regular_file(entry)) {
-                    count++;
-                    continue;
-                }
-
-                std::string filepath = entry.path().string();
-                std::string hash = computeHash(filepath);
-                float entropy = calculateEntropy(filepath);
-                bool yaraMatch = false;
-                if (yaraRules) {
-                    yr_rules_scan_file(yaraRules, filepath.c_str(), 0, yaraCallback, &filepath, 0);
-                    yaraMatch = yaraMatchedFiles.count(filepath);
-                }
-                bool hashMatch = malwareHashes.count(hash);
-                int score = calculateThreatScore(yaraMatch, hashMatch, entropy);
-
-                std::lock_guard<std::mutex> lock(resultsMutex);
-                if (yaraMatch || hashMatch) {
-                    maliciousFiles.emplace_back(filepath, hash);
-                    logs.emplace_back("[MALICIOUS] " + filepath + " | Score: " + std::to_string(score) + " | Entropy: " + std::to_string(entropy));
-                    maliciousCount++;
-                    showBlinkNotification = true;
-                }
-                else {
-                    normalFiles.emplace_back(filepath, hash);
-                    logs.emplace_back("[CLEAN] " + filepath + " | Entropy: " + std::to_string(entropy));
-                    cleanCount++;
-                }
-                count++;
-                scanProgress = static_cast<float>(count) / total;
-            }
-
-            {
-                std::lock_guard<std::mutex> lock(resultsMutex);
-                scanResults.insert(scanResults.end(), maliciousFiles.begin(), maliciousFiles.end());
-                scanResults.insert(scanResults.end(), normalFiles.begin(), normalFiles.end());
-            }
-            status = "Scan Complete.";
-            scanProgress = 1.0f;
-            strcpy(monitorPath, dirPath);
             });
         scanThread.detach();
     }
@@ -284,18 +373,21 @@ void renderScannerGUI(YR_RULES* yaraRules) {
     ImGui::Separator();
     ImGui::Text("Results:");
     ImGui::BeginChild("Results", ImVec2(0, 200), true);
-    for (const auto& res : scanResults) {
-        bool isMalicious = malwareHashes.count(res.second) || yaraMatchedFiles.count(res.first);
-        ImVec4 color = isMalicious ? ImVec4(1, 0.3f, 0.3f, 1) : ImVec4(0.3f, 1, 0.3f, 1);
-        ImGui::PushStyleColor(ImGuiCol_Text, color);
-        ImGui::TextWrapped("[%s] %s", isMalicious ? "Malicious" : "Clean", res.first.c_str());
-        ImGui::PopStyleColor();
+    {
+        std::lock_guard<std::mutex> lock(resultsMutex); // Added: Thread safety
+        for (const auto& res : scanResults) {
+            bool isMalicious = malwareHashes.count(res.second) > 0 || yaraMatchedFiles.count(res.first) > 0;
+            ImVec4 color = isMalicious ? ImVec4(1, 0.3f, 0.3f, 1) : ImVec4(0.3f, 1, 0.3f, 1);
+            ImGui::PushStyleColor(ImGuiCol_Text, color);
+            ImGui::TextWrapped("[%s] %s", isMalicious ? "Malicious" : "Clean", res.first.c_str());
+            ImGui::PopStyleColor();
+        }
     }
     ImGui::EndChild();
 
     ImGui::Separator();
     ImGui::Text("Statistics:");
-    float totalScanned = maliciousCount + cleanCount;
+    float totalScanned = static_cast<float>(maliciousCount + cleanCount);
     if (totalScanned > 0.0f) {
         float values[] = { (float)cleanCount / totalScanned, (float)maliciousCount / totalScanned };
         ImGui::PlotHistogram("Malicious vs Clean", values, 2, 0, nullptr, 0.0f, 1.0f, ImVec2(0, 100));
@@ -318,30 +410,72 @@ void renderScannerGUI(YR_RULES* yaraRules) {
 
     ImGui::Text("Log:");
     ImGui::BeginChild("LogWindow", ImVec2(0, 120), true);
-    for (const auto& log : logs) {
-        ImGui::TextUnformatted(log.c_str());
+    {
+        std::lock_guard<std::mutex> lock(resultsMutex); // Added: Thread safety
+        for (const auto& log : logs) {
+            ImGui::TextUnformatted(log.c_str());
+        }
     }
     ImGui::EndChild();
 
     ImGui::End();
 }
+
 int main(int argc, char** argv) {
+    // Initialize YARA
+    if (yr_initialize() != 0) {
+        std::cerr << "[ERROR] Failed to initialize YARA." << std::endl;
+        return 1;
+    }
+
     std::filesystem::path exePath = std::filesystem::absolute(argv[0]);
     std::filesystem::path exeDir = exePath.parent_path();
     std::filesystem::path rulePath = exeDir / "rules" / "ByteAV_rules.yar";
 
-    YR_RULES* yaraRules = compileYaraRules(rulePath.string());
-    if (!yaraRules) {
-        std::cerr << "[ERROR] Failed to compile YARA rules." << std::endl;
+    YR_RULES* yaraRules = nullptr;
+    try {
+        yaraRules = compileYaraRules(rulePath.string());
+        if (!yaraRules) {
+            std::cerr << "[ERROR] Failed to compile YARA rules." << std::endl;
+            logs.push_back("[ERROR] Failed to compile YARA rules.");
+        }
+    }
+    catch (const std::exception& e) {
+        std::cerr << "[ERROR] Exception during YARA rules compilation: " << e.what() << std::endl;
+        logs.push_back("[ERROR] Exception during YARA rules compilation: " + std::string(e.what()));
+    }
+
+    try {
+        malwareHashes = loadSha256Hashes("sha256_only.csv");
+    }
+    catch (const std::exception& e) {
+        std::cerr << "[ERROR] Failed to load hash database: " << e.what() << std::endl;
+        logs.push_back("[ERROR] Failed to load hash database: " + std::string(e.what()));
+    }
+
+    try {
+        if (!std::filesystem::exists("scandir")) {
+            std::filesystem::create_directory("scandir");
+        }
+    }
+    catch (const std::exception& e) {
+        std::cerr << "[ERROR] Failed to create scandir: " << e.what() << std::endl;
+        logs.push_back("[ERROR] Failed to create scandir: " + std::string(e.what()));
+    }
+
+    if (!glfwInit()) {
+        std::cerr << "[ERROR] Failed to initialize GLFW." << std::endl;
+        yr_finalize(); // Clean up YARA
         return 1;
     }
 
-    malwareHashes = loadSha256Hashes("sha256_only.csv");
-    std::filesystem::create_directory("scandir");
-
-    if (!glfwInit()) return 1;
     GLFWwindow* window = glfwCreateWindow(1000, 700, "ByteAV Antivirus", NULL, NULL);
-    if (!window) return 1;
+    if (!window) {
+        std::cerr << "[ERROR] Failed to create GLFW window." << std::endl;
+        glfwTerminate();
+        yr_finalize(); // Clean up YARA
+        return 1;
+    }
 
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
@@ -400,7 +534,12 @@ int main(int argc, char** argv) {
         glfwSwapBuffers(window);
     }
 
-    destroyYaraRules(yaraRules);
+    if (yaraRules) {
+        destroyYaraRules(yaraRules);
+    }
+    // Clean up YARA
+    yr_finalize();
+
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
@@ -408,5 +547,3 @@ int main(int argc, char** argv) {
     glfwTerminate();
     return 0;
 }
-
-

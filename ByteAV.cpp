@@ -8,15 +8,12 @@
 #include <openssl/evp.h>
 #include <mutex>
 #include <yara.h>
-
-
 using namespace std;
 namespace fs = std::filesystem;
-
 std::unordered_set<std::string> yaraMatchedFiles;
+std::unordered_set<std::string> malwareHashes;
 static std::mutex printMutex;
 static const string quarantineFolder = R"(C:\ByteAV\Quarantine)";
-
 void quarantineFile(const std::string& filePath) {
     fs::create_directories(quarantineFolder);
     fs::path dest = fs::path(quarantineFolder) / fs::path(filePath).filename();
@@ -29,7 +26,6 @@ void quarantineFile(const std::string& filePath) {
         std::cerr << "[ERROR] Quarantine failed\n";
     }
 }
-
 void deleteFile(const std::string& filePath) {
     try {
         fs::remove(filePath);
@@ -40,7 +36,6 @@ void deleteFile(const std::string& filePath) {
         std::cerr << "[ERROR] Delete failed\n";
     }
 }
-
 std::unordered_set<std::string> loadSha256Hashes(const std::string& filename) {
     std::unordered_set<std::string> db;
     std::ifstream f(filename);
@@ -51,7 +46,6 @@ std::unordered_set<std::string> loadSha256Hashes(const std::string& filename) {
     std::cout << "[INFO] Loaded " << db.size() << " hashes\n";
     return db;
 }
-
 std::string computeHash(const std::string& path) {
     EVP_MD_CTX* ctx = EVP_MD_CTX_new();
     EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
@@ -70,7 +64,6 @@ std::string computeHash(const std::string& path) {
     for (unsigned i = 0; i < len; i++) ss << std::setw(2) << (int)out[i];
     return ss.str();
 }
-
 YR_RULES* compileYaraRules(const std::string& rulePath) {
     if (yr_initialize() != ERROR_SUCCESS) {
         std::cerr << "YARA init failed\n";
@@ -100,7 +93,6 @@ YR_RULES* compileYaraRules(const std::string& rulePath) {
     yr_compiler_destroy(cmp);
     return rules;
 }
-
 int yaraCallback(YR_SCAN_CONTEXT*, int msg, void* message_data, void* user_data) {
     if (msg != CALLBACK_MSG_RULE_MATCHING) return CALLBACK_CONTINUE;
     auto* filePath = static_cast<std::string*>(user_data);
@@ -120,11 +112,9 @@ int yaraCallback(YR_SCAN_CONTEXT*, int msg, void* message_data, void* user_data)
             p += std::strlen(p) + 1;
         }
     }
-
     log << "--------------------------------\n";
     return CALLBACK_CONTINUE;
 }
-
 void scanDirectory(const fs::path& dir,
     const std::unordered_set<std::string>& db,
     std::vector<std::pair<std::string, std::string>>& normal,
