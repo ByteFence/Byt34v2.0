@@ -12,6 +12,7 @@
 #include <atomic>
 #include <thread>
 #include <windows.h>
+#include <shellapi.h>
 #include <psapi.h>
 #include <unordered_set>
 #include <mutex>
@@ -374,13 +375,28 @@ void renderScannerGUI(YR_RULES* yaraRules) {
     ImGui::Text("Results:");
     ImGui::BeginChild("Results", ImVec2(0, 200), true);
     {
-        std::lock_guard<std::mutex> lock(resultsMutex); // Added: Thread safety
+        std::lock_guard<std::mutex> lock(resultsMutex);
         for (const auto& res : scanResults) {
-            bool isMalicious = malwareHashes.count(res.second) > 0 || yaraMatchedFiles.count(res.first) > 0;
-            ImVec4 color = isMalicious ? ImVec4(1, 0.3f, 0.3f, 1) : ImVec4(0.3f, 1, 0.3f, 1);
+            bool isMalicious = malwareHashes.count(res.second) > 0
+                || yaraMatchedFiles.count(res.first) > 0;
+            ImVec4 color = isMalicious
+                ? ImVec4(1, 0.3f, 0.3f, 1)
+                : ImVec4(0.3f, 1, 0.3f, 1);
+
+            // make each path a selectable item
             ImGui::PushStyleColor(ImGuiCol_Text, color);
-            ImGui::TextWrapped("[%s] %s", isMalicious ? "Malicious" : "Clean", res.first.c_str());
+            ImGui::Selectable(res.first.c_str());
             ImGui::PopStyleColor();
+
+            // on double-click, open the file location
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                ShellExecuteA(nullptr,
+                    "open",
+                    res.first.c_str(),
+                    nullptr,
+                    nullptr,
+                    SW_SHOWDEFAULT);
+            }
         }
     }
     ImGui::EndChild();
@@ -396,6 +412,7 @@ void renderScannerGUI(YR_RULES* yaraRules) {
         ImGui::Text("Malicious Files: %d", maliciousCount);
     }
 
+
     MEMORYSTATUSEX mem = { sizeof(mem) };
     GlobalMemoryStatusEx(&mem);
     ImGui::Text("RAM: %d%% used", mem.dwMemoryLoad);
@@ -407,7 +424,28 @@ void renderScannerGUI(YR_RULES* yaraRules) {
         lastCpuSample = std::chrono::steady_clock::now();
     }
     ImGui::PlotLines("CPU Usage", cpuData, 100, dataOffset);
-
+    ImGui::Separator();
+    ImGui::Text("Reporting:");
+    if (ImGui::Button("Export CSV Report")) {
+        const std::string fn = "ByteAV_Report.csv";
+        std::ofstream out(fn);
+        out << "Path,Hash,Classification\n";
+        for (auto& p : scanResults) {
+            bool mal = malwareHashes.count(p.second)
+                || yaraMatchedFiles.count(p.first);
+            out
+                << "\"" << p.first << "\"" << ','
+                << p.second << ','
+                << (mal ? "Malicious" : "Clean")
+                << '\n';
+        }
+        out.close();
+        // inform user
+        {
+            std::lock_guard<std::mutex> lock(resultsMutex);
+            logs.push_back("[INFO] CSV report written to " + fn);
+        }
+    }
     ImGui::Text("Log:");
     ImGui::BeginChild("LogWindow", ImVec2(0, 120), true);
     {
