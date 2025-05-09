@@ -534,34 +534,45 @@ int main(int argc, char** argv) {
         ImGui::NewFrame();
 
         if (showStartupScreen) {
-            startupTimer += ImGui::GetIO().DeltaTime;
-            ImGui::Begin("ByteAV - Initialization", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+            // — Splash / Welcome Screen —
+            ImGui::Begin("ByteAV - Welcome", nullptr,
+                ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
             ImGui::SetWindowSize(ImVec2(600, 300));
             ImGui::SetWindowPos(ImVec2(200, 200));
 
-            ImGui::Text("ByteAV - v1.0");
+            // 1) Enlarge the header
+            ImGui::SetWindowFontScale(1.3f);
+            ImGui::Text("ByteAV  v1.0");
             ImGui::Text("Real-Time Threat Intelligence Engine Initialized");
+            ImGui::SetWindowFontScale(1.0f);   // back to normal for the details
 
-            if (startupTimer >= 1.0f) ImGui::Text("[OK] Hash DB Loaded");
-            else ImGui::Text("loading... Hash DB");
-
-            if (startupTimer >= 2.0f) ImGui::Text("[OK] YARA Rules Active");
-            else if (startupTimer >= 1.0f) ImGui::Text("loading... YARA");
-
-            if (startupTimer >= 3.0f) ImGui::Text("[OK] Live Monitoring Ready");
-            else if (startupTimer >= 2.0f) ImGui::Text("loading... Monitor");
-
+            // 2) Status lines (styled)
+            ImGui::TextColored(ImVec4(0.2f, 0.8f, 1.0f, 1.0f),
+                startupTimer < 1.0f ? "loading... Hash DB" : "[OK] Hash DB Loaded");
+            ImGui::TextColored(ImVec4(0.2f, 0.8f, 1.0f, 1.0f),
+                startupTimer < 2.0f ? "loading... YARA" : "[OK] YARA Rules Active");
+            ImGui::TextColored(ImVec4(0.2f, 0.8f, 1.0f, 1.0f),
+                startupTimer < 3.0f ? "loading... Monitor" : "[OK] Live Monitoring Ready");
             if (startupTimer >= 4.0f) {
-                ImGui::Text("[INFO] Loaded %zu hashes", malwareHashes.size());
+                ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f),
+                    "[INFO] Loaded %zu hashes", malwareHashes.size());
             }
 
-            if (startupTimer >= 6.0f) showStartupScreen = false;
+            // advance the timer (for styling only—you no longer auto-close)
+            startupTimer += ImGui::GetIO().DeltaTime;
+
+            // 3) “Enter ByteAV” button to dismiss splash
+            ImGui::Dummy(ImVec2(0, 20));
+            if (ImGui::Button("Enter ByteAV", ImVec2(200, 0))) {
+                showStartupScreen = false;
+            }
 
             ImGui::End();
         }
         else {
             renderScannerGUI(yaraRules);
         }
+
 
         ImGui::Render();
         int w, h;
