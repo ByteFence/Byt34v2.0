@@ -7,6 +7,7 @@
 #include <functional>
 
 extern std::unordered_set<std::string> yaraMatchedFiles;
+extern std::unordered_set<std::string> malwareHashes;
 
 // File operations
 void quarantineFile(const std::string& filePath);

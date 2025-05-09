@@ -13,6 +13,7 @@
 #include <windows.h>
 #include <psapi.h>
 #include <unordered_set>
+#include <mutex>
 
 static std::string status = "Idle";
 std::vector<std::pair<std::string, std::string>> scanResults;
@@ -21,6 +22,16 @@ static float scanProgress = 0.0f;
 static float cpuData[100] = { 0.0f };
 static int dataOffset = 0;
 static auto lastCpuSample = std::chrono::steady_clock::now();
+static std::mutex resultsMutex;
+
+// Make malware hashes available globally
+std::unordered_set<std::string> malwareHashes;
+
+// Currently monitored directory
+static std::string monitoredDirectory;
+static bool isMonitoring = false;
+static std::atomic<bool> stopMonitor{ false };
+static std::thread monitorThread;
 
 extern void scanFileWithYara(const std::string& filePath, YR_RULES* rules);
 
@@ -44,6 +55,71 @@ float GetCPUUsage() {
     return total ? 100.0f * (1.0f - ((float)idleDiff / total)) : 0.0f;
 }
 
+// Fixed startMonitoring function from main.cpp
+// Fixed startMonitoring function
+void startMonitoring(const std::string& dirPath, YR_RULES* yaraRules) {
+    try {
+        // Stop any existing monitoring
+        if (isMonitoring) {
+            stopMonitor.store(true);
+
+            // Give the thread time to gracefully stop
+            for (int i = 0; i < 10 && monitorThread.joinable(); i++) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+
+            if (monitorThread.joinable()) {
+                monitorThread.join();
+            }
+            stopDirectoryMonitor();
+        }
+
+        // Make sure the directory exists
+        std::filesystem::path monitorPath(dirPath);
+        if (!std::filesystem::exists(monitorPath)) {
+            try {
+                std::filesystem::create_directories(monitorPath);
+                logs.push_back("[INFO] Created directory: " + dirPath);
+            }
+            catch (const std::exception& e) {
+                logs.push_back("[ERROR] Failed to create directory: " + dirPath + " - " + e.what());
+                status = "Error: Failed to create directory";
+                return;
+            }
+        }
+
+        // Reset monitoring state
+        stopMonitor.store(false);
+        isMonitoring = true;
+        monitoredDirectory = dirPath;
+
+        // Start new monitoring thread with proper initialization
+        startDirectoryMonitor(dirPath, yaraRules, stopMonitor);
+
+        logs.push_back("[INFO] Started monitoring: " + dirPath);
+        status = "Monitoring: " + dirPath;
+    }
+    catch (const std::exception& e) {
+        logs.push_back("[ERROR] Failed to start monitoring: " + std::string(e.what()));
+        status = "Error: Failed to start monitoring";
+    }
+}
+
+// Fixed stopMonitoring function from main.cpp
+void stopMonitoring() {
+    if (isMonitoring) {
+        stopMonitor.store(true);
+        if (monitorThread.joinable()) {
+            monitorThread.join();
+        }
+        stopDirectoryMonitor();
+
+        isMonitoring = false;
+        logs.push_back("[INFO] Stopped monitoring: " + monitoredDirectory);
+        status = "Idle";
+    }
+}
+
 int main(int argc, char** argv) {
     std::filesystem::path exePath = std::filesystem::absolute(argv[0]);
     std::filesystem::path exeDir = exePath.parent_path();
@@ -55,17 +131,15 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::unordered_set<std::string> malwareHashes = loadSha256Hashes("sha256_only.csv");
+    malwareHashes = loadSha256Hashes("sha256_only.csv");
     std::filesystem::create_directory("scandir");
-    std::atomic<bool> stopMonitor{ false };
-    std::thread monitorThread([&]() {
-        startDirectoryMonitor("scandir", yaraRules, stopMonitor);
-        });
+
+    // Default monitored directory
+    std::string defaultMonitorDir = "scandir";
+    logs.push_back("[INFO] Default monitoring directory: " + defaultMonitorDir);
 
     if (!glfwInit()) {
         std::cerr << "[ERROR] Failed to initialize GLFW" << std::endl;
-        stopMonitor.store(true);
-        monitorThread.join();
         destroyYaraRules(yaraRules);
         return 1;
     }
@@ -74,8 +148,6 @@ int main(int argc, char** argv) {
     if (!window) {
         std::cerr << "[ERROR] Failed to create window" << std::endl;
         glfwTerminate();
-        stopMonitor.store(true);
-        monitorThread.join();
         destroyYaraRules(yaraRules);
         return 1;
     }
@@ -90,6 +162,7 @@ int main(int argc, char** argv) {
     ImGui_ImplOpenGL3_Init("#version 130");
 
     static char dirPath[256] = "C:\\";
+    static char monitorPath[256] = "scandir";
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
         ImGui_ImplOpenGL3_NewFrame();
@@ -97,6 +170,9 @@ int main(int argc, char** argv) {
         ImGui::NewFrame();
 
         ImGui::Begin("ByteAV Scanner");
+
+        // Scan section
+        ImGui::Text("Scan Settings");
         ImGui::InputText("Scan Directory", dirPath, IM_ARRAYSIZE(dirPath));
         if (ImGui::Button("Start Scan")) {
             status = "Scanning...";
@@ -107,10 +183,22 @@ int main(int argc, char** argv) {
             std::thread scanThread([&]() {
                 std::vector<std::pair<std::string, std::string>> normalFiles, maliciousFiles;
                 std::filesystem::path root(dirPath);
+
+                if (!std::filesystem::exists(root)) {
+                    status = "Error: Directory does not exist";
+                    scanProgress = 1.0f;
+                    return;
+                }
+
                 size_t total = std::distance(std::filesystem::recursive_directory_iterator(root), {});
                 size_t count = 0;
 
                 for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
+                    if (!std::filesystem::is_regular_file(entry)) {
+                        count++;
+                        continue;
+                    }
+
                     std::string filepath = entry.path().string();
                     std::string hash = computeHash(filepath);
 
@@ -118,6 +206,7 @@ int main(int argc, char** argv) {
                         yr_rules_scan_file(yaraRules, filepath.c_str(), 0, yaraCallback, &filepath, 0);
                     }
 
+                    std::lock_guard<std::mutex> lock(resultsMutex);
                     if (malwareHashes.count(hash) || yaraMatchedFiles.count(filepath)) {
                         maliciousFiles.emplace_back(filepath, hash);
                         logs.emplace_back("[MALICIOUS] " + filepath);
@@ -130,16 +219,41 @@ int main(int argc, char** argv) {
                     scanProgress = static_cast<float>(count) / total;
                 }
 
+                std::lock_guard<std::mutex> lock(resultsMutex);
                 scanResults.insert(scanResults.end(), maliciousFiles.begin(), maliciousFiles.end());
                 scanResults.insert(scanResults.end(), normalFiles.begin(), normalFiles.end());
                 status = "Scan Complete.";
                 scanProgress = 1.0f;
+
+                // Automatically start monitoring the scanned directory
+                strcpy(monitorPath, dirPath);
                 });
             scanThread.detach();
         }
 
         ImGui::Text("Status: %s", status.c_str());
         ImGui::ProgressBar(scanProgress);
+        ImGui::Separator();
+
+        // Monitor section
+        ImGui::Text("Active Monitoring");
+        ImGui::InputText("Monitor Directory", monitorPath, IM_ARRAYSIZE(monitorPath));
+
+        ImGui::BeginGroup();
+        if (!isMonitoring) {
+            if (ImGui::Button("Start Monitoring")) {
+                startMonitoring(monitorPath, yaraRules);
+            }
+        }
+        else {
+            if (ImGui::Button("Stop Monitoring")) {
+                stopMonitoring();
+            }
+            ImGui::SameLine();
+            ImGui::Text("Currently monitoring: %s", monitoredDirectory.c_str());
+        }
+        ImGui::EndGroup();
+
         ImGui::Separator();
 
         ImGui::Text("Results:");
@@ -182,9 +296,8 @@ int main(int argc, char** argv) {
         glfwSwapBuffers(window);
     }
 
-    stopMonitor.store(true);
-    monitorThread.join();
-    stopDirectoryMonitor();
+    // Clean up
+    stopMonitoring();
     destroyYaraRules(yaraRules);
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
