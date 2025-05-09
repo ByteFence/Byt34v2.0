@@ -551,36 +551,49 @@ int main(int argc, char** argv) {
             ImGui::SetWindowFontScale(2.0f);
             {
                 const char* title = "ByteAV";
-                float txtW = ImGui::CalcTextSize(title).x;
-                ImGui::SetCursorPosX((600 - txtW) * 0.5f);
+                float w = ImGui::CalcTextSize(title).x;
+                ImGui::SetCursorPosX((600 - w) * 0.5f);
                 ImGui::TextUnformatted(title);
             }
             ImGui::SetWindowFontScale(1.0f);
             ImGui::PopStyleColor();
 
-            ImGui::Dummy(ImVec2(0, 10));
+            ImGui::Dummy(ImVec2(0, 15));
 
             // ─── Subtitle ─────────────────────────────────────────────────────
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.00f));
             {
                 const char* sub = "Real-Time Threat Intelligence Engine";
-                float txtW = ImGui::CalcTextSize(sub).x;
-                ImGui::SetCursorPosX((600 - txtW) * 0.5f);
+                float w = ImGui::CalcTextSize(sub).x;
+                ImGui::SetCursorPosX((600 - w) * 0.5f);
                 ImGui::TextUnformatted(sub);
             }
             ImGui::PopStyleColor();
 
             ImGui::Dummy(ImVec2(0, 20));
 
-            // ─── Loading Progress Bar ─────────────────────────────────────────
+            // ─── Status Lines ─────────────────────────────────────────────────
             float progress = std::min(startupTimer / 4.0f, 1.0f);
+            ImGui::Text("Real-Time Threat Intelligence Initialized");
+            if (progress >= 0.25f)
+                ImGui::Text("[OK] Hash DB Loaded");
+            if (progress >= 0.50f)
+                ImGui::Text("[OK] YARA Rules Active");
+            if (progress >= 0.75f)
+                ImGui::Text("[OK] Live Monitoring Ready");
+
+            // dynamic “Loading XX hashes…” line
+            size_t loaded = static_cast<size_t>(malwareHashes.size() * progress);
+            ImGui::Text("Loading %zu hashes...", loaded);
+
+            ImGui::Dummy(ImVec2(0, 20));
+
+            // ─── Progress Bar & Enter Button ─────────────────────────────────
             ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.2f, 0.7f, 0.3f, 1.00f));
             ImGui::ProgressBar(progress, ImVec2(-1, 0));
             ImGui::PopStyleColor();
 
             ImGui::Dummy(ImVec2(0, 20));
-
-            // ─── Enter Button (after full load) ──────────────────────────────
             if (progress >= 1.0f) {
                 if (ImGui::Button("Enter ByteAV", ImVec2(-1, 0))) {
                     showStartupScreen = false;
@@ -594,6 +607,7 @@ int main(int argc, char** argv) {
         else {
             renderScannerGUI(yaraRules);
         }
+
 
 
 
