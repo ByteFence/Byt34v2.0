@@ -2,6 +2,8 @@
 project(ByteAV)
 
 set(CMAKE_CXX_STANDARD 17)
+
+#set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL$<$<CONFIG:Debug>:Debug>")
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL$<$<CONFIG:Debug>:Debug>")
 
 # vcpkg toolchain
@@ -15,8 +17,8 @@ find_package(glfw3   REQUIRED)
 find_package(OpenGL  REQUIRED)
 
 # YARA headers + lib
-find_path(YARA_INCLUDE_DIR NAMES yara.h PATHS "C:/vcpkg/installed/x64-windows-static/include/yara")
-find_library(YARA_LIB NAMES yara PATHS "C:/vcpkg/installed/x64-windows-static/lib")
+find_path(YARA_INCLUDE_DIR NAMES yara.h PATHS "C:/vcpkg/installed/x64-windows/include/yara")
+find_library(YARA_LIB NAMES yara PATHS "C:/vcpkg/installed/x64-windows/lib")
 
 if(NOT YARA_INCLUDE_DIR OR NOT YARA_LIB)
   message(FATAL_ERROR "YARA library not found. Check include dir: ${YARA_INCLUDE_DIR} and lib: ${YARA_LIB}")
